@@ -3,6 +3,7 @@ import requests
 import pandas as pd
 import pandas_ta as ta
 from flask import Flask, jsonify
+from smartmoneyconcepts import smc
 
 app = Flask(__name__)
 
@@ -10,52 +11,67 @@ TWELVE_DATA_KEY = os.getenv("TWELVE_DATA_KEY")
 
 @app.route('/')
 def home():
-    return "Gold Terminal Pro: Logic Online"
+    return "Gold Terminal Pro: SMC Engine Active"
 
 @app.route('/signal')
-def get_analysis():
+def get_smc_signal():
     try:
-        # 1. Fetch Price & History
-        url = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=1h&outputsize=50&apikey={TWELVE_DATA_KEY}"
+        # 1. Fetch High-Quality 1H Data
+        url = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=1h&outputsize=100&apikey={TWELVE_DATA_KEY}"
         res = requests.get(url).json()
         
         if "values" not in res:
-            return jsonify({"status": "Waiting for Data", "msg": "Twelve Data is still syncing."})
+            return jsonify({"status": "Error", "message": "API Limit or Key Issue"})
 
-        # 2. Convert to DataFrame for Analysis
+        # 2. Format Data for Smart Money Logic
         df = pd.DataFrame(res["values"])
-        df["close"] = pd.to_numeric(df["close"])
-        df = df.iloc[::-1] # Newest at the bottom
+        df[["open", "high", "low", "close"]] = df[["open", "high", "low", "close"]].apply(pd.to_numeric)
+        df = df.iloc[::-1].reset_index(drop=True)
 
-        # 3. Technical Analysis (TA)
-        rsi = df.ta.rsi(length=14).iloc[-1]
-        sma_20 = df.ta.sma(length=20).iloc[-1]
-        current_price = df["close"].iloc[-1]
+        # 3. Detect Break of Structure (BoS) & Order Blocks (OB)
+        # We look for swing points to identify BoS
+        swing_hl = smc.swing_highs_lows(df, swing_length=5)
+        bos_data = smc.bos_choch(df, swing_hl)
         
-        # Support/Resistance Zones
-        support = df["close"].min()
-        resistance = df["close"].max()
+        current_price = df["close"].iloc[-1]
+        last_bos = bos_data.iloc[-1]
+        
+        # 4. Identify Zones (Supply/Demand Boxes)
+        demand_zone = df["low"].tail(20).min()
+        supply_zone = df["high"].tail(20).max()
 
-        # Logic Brain
-        if rsi > 70:
-            signal, reason = "SELL", "Overbought (RSI > 70)"
-        elif rsi < 30:
-            signal, reason = "BUY", "Oversold (RSI < 30)"
-        else:
-            signal = "BUY" if current_price > sma_20 else "SELL"
-            reason = "Trending with Moving Average"
+        # 5. Trading Logic
+        signal = "NEUTRAL"
+        reasoning = "Price consolidating between major zones."
+        
+        if last_bos['BOS'] == 1:
+            signal = "STRONG BUY"
+            reasoning = f"Bullish BoS detected at ${last_bos['Level']:.2f}. Trend is UP."
+        elif last_bos['BOS'] == -1:
+            signal = "STRONG SELL"
+            reasoning = f"Bearish BoS detected at ${last_bos['Level']:.2f}. Trend is DOWN."
+        elif current_price <= demand_zone * 1.002:
+            signal = "BUY"
+            reasoning = "Price rejected Demand Zone. Looking for reversal."
 
         return jsonify({
-            "price": f"${current_price:,.2f}",
-            "trend": "UP" if current_price > sma_20 else "DOWN",
-            "rsi": round(rsi, 2),
-            "zones": {"support": f"${support:,.2f}", "resistance": f"${resistance:,.2f}"},
-            "recommendation": signal,
-            "logic": reason
+            "live_price": f"${current_price:,.2f}",
+            "market_structure": "BULLISH" if last_bos['BOS'] == 1 else "BEARISH",
+            "signal": signal,
+            "why": reasoning,
+            "zones": {
+                "buy_zone_demand": f"${demand_zone:,.2f}",
+                "sell_zone_supply": f"${supply_zone:,.2f}"
+            },
+            "targets": {
+                "TP": f"${supply_zone:,.2f}",
+                "SL": f"${(demand_zone * 0.995):,.2f}"
+            }
         })
 
     except Exception as e:
-        return jsonify({"error": "System Rebooting", "details": str(e)})
+        return jsonify({"status": "Recalibrating", "error": str(e)})
 
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=10000)
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
