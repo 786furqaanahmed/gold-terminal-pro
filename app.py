@@ -1,5 +1,7 @@
 import os
 import requests
+import pandas as pd
+import pandas_ta as ta
 from flask import Flask, jsonify
 
 app = Flask(__name__)
@@ -7,46 +9,69 @@ app = Flask(__name__)
 TWELVE_DATA_KEY = os.getenv("TWELVE_DATA_KEY")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 
-@app.route('/')
-def home():
-    return "Gold Terminal Pro: Engine Online"
+def get_technical_analysis():
+    # Fetching historical data for trend analysis
+    url = f"https://api.twelvedata.com/time_series?symbol=XAU/USD&interval=1h&outputsize=50&apikey={TWELVE_DATA_KEY}"
+    data = requests.get(url).json()
+    
+    if "values" not in data:
+        return None
+
+    df = pd.DataFrame(data["values"])
+    df["close"] = pd.to_numeric(df["close"])
+    df = df.iloc[::-1] # Reverse to chronological order
+
+    # Indicators
+    rsi = df.ta.rsi(length=14).iloc[-1]
+    sma_20 = df.ta.sma(length=20).iloc[-1]
+    current_price = df["close"].iloc[-1]
+    
+    # Simple Support/Resistance Logic
+    support = df["close"].min()
+    resistance = df["close"].max()
+
+    # Trend Decision
+    trend = "BULLISH" if current_price > sma_20 else "BEARISH"
+    
+    # Recommendation Logic
+    reason = "Price is above 20MA with healthy RSI."
+    if rsi > 70:
+        signal = "SELL / TAKE PROFIT"
+        reason = "Gold is Overbought (RSI > 70). High risk of drop."
+    elif rsi < 30:
+        signal = "STRONG BUY"
+        reason = "Gold is Oversold (RSI < 30). Bounce expected."
+    else:
+        signal = "BUY" if trend == "BULLISH" else "SELL"
+        reason = f"Following {trend} trend on 1H timeframe."
+
+    return {
+        "trend": trend,
+        "rsi": round(rsi, 2),
+        "support": f"${support:,.2f}",
+        "resistance": f"${resistance:,.2f}",
+        "signal": signal,
+        "reasoning": reason
+    }
 
 @app.route('/signal')
-def get_analysis():
+def get_full_analysis():
     try:
-        # 1. FIXED PRICE FETCH (Using 'price' endpoint for speed)
-        price_url = f"https://api.twelvedata.com/price?symbol=XAU/USD&apikey={TWELVE_DATA_KEY}"
-        p_res = requests.get(price_url).json()
-        current_price = p_res.get('price', 'N/A')
+        # Get Live Price
+        p_res = requests.get(f"https://api.twelvedata.com/price?symbol=XAU/USD&apikey={TWELVE_DATA_KEY}").json()
+        price = p_res.get('price', 'N/A')
 
-        # 2. TARGETED NEWS (Focusing strictly on Gold & Central Banks)
-        news_url = f"https://newsapi.org/v2/everything?q=%22gold+price%22+OR+%22XAU%22+OR+%22federal+reserve%22&language=en&sortBy=publishedAt&apiKey={NEWS_API_KEY}"
-        n_res = requests.get(news_url).json()
-        articles = n_res.get('articles', [])
-        
-        headlines = [a['title'] for a in articles[:3]]
-        
-        # 3. ADVANCED SENTIMENT
-        bullish_words = ["inflation", "crisis", "war", "cut", "weak", "buy", "demand"]
-        full_text = " ".join(headlines).lower()
-        
-        sentiment = "NEUTRAL"
-        if any(word in full_text for word in bullish_words):
-            sentiment = "BULLISH (Potential Upside)"
-        elif "hike" in full_text or "stronger dollar" in full_text:
-            sentiment = "BEARISH (Potential Downside)"
+        # Get Technicals
+        ta_data = get_technical_analysis()
 
         return jsonify({
-            "market": "XAU/USD (Gold)",
-            "price": f"${float(current_price):,.2f}" if current_price != 'N/A' else "Market Closed/API Error",
-            "news_sentiment": sentiment,
-            "top_headlines": headlines if headlines else ["No high-impact news in last hour"],
-            "recommendation": "Strong Buy" if sentiment == "BULLISH (Potential Upside)" else "Wait for Setup"
+            "status": "LIVE",
+            "price": f"${float(price):,.2f}",
+            "analysis": ta_data,
+            "instruction": f"ENTRY: {ta_data['signal']} | TP: {ta_data['resistance']} | SL: {ta_data['support']}"
         })
-
     except Exception as e:
-        return jsonify({"error": "Calibration error", "msg": str(e)})
+        return jsonify({"error": "Analyzing Markets...", "details": str(e)})
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=10000)
